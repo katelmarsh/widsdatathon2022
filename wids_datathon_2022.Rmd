@@ -1,0 +1,362 @@
+---
+title: "wids_datathon2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## WIDS Datathon 2022
+
+
+```{r cleaning}
+library(dplyr)
+library(boot)
+library(tidyverse)
+library(caret)
+train <- read_csv("~/Downloads/wids/train.csv")
+test <- read_csv("~/Desktop/test.csv")
+
+#plot(train$energy_star_rating, train$site_eui)
+#plot(train$year_built, train$site_eui) # make the 0s into the average year 
+
+# CLEANING YEAR BUILT - taking out NA values and 0 values 
+train$year_built[which(is.na(train$year_built) | train$year_built == 0)] <- mean(train$year_built, na.rm = TRUE)
+train$Year_Factor <- as.factor(train$Year_Factor)
+train$Year_Factor <- factor(train$Year_Factor, levels = c(1:7))
+train$State_Factor <- as.factor(train$State_Factor)
+#train$building_class <- as.factor(train$building_class)
+train$building_class <- ifelse(train$building_class == "residential", 1, 0)
+#train$no_fog_record <- ifelse(is.na(train$days_with_fog) == TRUE | train$days_with_fog == 0, 1, 0)
+train$no_energy_star <- ifelse(is.na(train$energy_star_rating) == TRUE, 1, 0)
+#train$energy_star_rating <- as.factor(train$energy_star_rating)
+
+num_columns <- names(train[which(lapply(train,class) == "numeric" | lapply(train,class) == "integer")])
+cat_columns <- names(train[which(lapply(train,class) == "character" | lapply(train,class) == "factor")])
+
+# Most are in the top 6
+significant <- names(sort(table(train$facility_type )/length(train$facility_type), decreasing = TRUE)[1:6])
+train <- train %>% mutate(facility_type = fct_lump(facility_type, n = 7))
+
+# function to make the range difference  
+diff_range <- function(x){
+  diff(range(x))
+}
+
+# train avg temp 
+train_max <- train %>%
+    select(contains('max_temp')) 
+train$avg_max_temp <- apply(train_max, 1, mean)
+train$max_max_temp <- apply(train_max, 1, max)
+train$min_max_temp <- apply(train_max, 1, min)
+train$range_max_temp <- apply(train_max, 1, diff_range)
+
+train_min <- train %>%
+    select(contains('min_temp')) 
+train$avg_min_temp <- apply(train_min, 1, mean)
+train$max_min_temp <- apply(train_min, 1, max)
+train$min_max_temp <- apply(train_min, 1, min)
+train$range_max_temp <- apply(train_min, 1, diff_range)
+
+train_avg <- train %>%
+    select(contains('avg_temp')) 
+train$avg_avg_temp <- apply(train_avg, 1, mean)
+train$max_avg_temp <- apply(train_avg, 1, max)
+train$min_avg_temp <- apply(train_avg, 1, min)
+train$range_avg_temp <- apply(train_avg, 1, diff_range)
+
+#plot(train$ELEVATION, train$site_eui) # some outliers close to 2000 
+#plot(train$days_with_fog, train$site_eui)
+#table(is.na(train$days_with_fog)) # lots of NA values, not sure what to do with them yet 
+#table(is.na(train$direction_max_wind_speed))
+#table(is.na(train$max_wind_speed))
+#table(is.na(train$energy_star_rating))
+
+# Hot encoding the dummy vars :) 
+dummy <- dummyVars("~.", data = train)
+newdata <- data.frame(predict(dummy, newdata = train))
+
+train_df <- subset(newdata, select =-c(days_with_fog, direction_max_wind_speed, max_wind_speed, direction_peak_wind_speed, id, energy_star_rating))
+
+#cor(train$site_eui, train_df)
+#corr=corr(train_df)
+#corr.style.background_gradient(cmap='coolwarm')
+
+#cleaning test 
+test$year_built[which(is.na(test$year_built) | test$year_built == 0)] <- mean(test$year_built, na.rm = TRUE)
+#test$Year_Factor <- as.factor(test$Year_Factor)
+test$Year_Factor <- factor(test$Year_Factor, levels=levels(train$Year_Factor)) # making same amt of levels 
+
+test$State_Factor <- as.factor(test$State_Factor)
+test$State_Factor <- factor(test$State_Factor, levels=levels(train$State_Factor)) # making same amt of levels 
+
+test$building_class <- ifelse(test$building_class == "residential", 1, 0)
+test$no_energy_star <- ifelse(is.na(test$energy_star_rating) == TRUE, 1, 0)
+test <- test %>% mutate(facility_type = fct_lump(facility_type, n = 7))
+test$facility_type <- factor(test$facility_type, levels=levels(train$facility_type)) # making same amt of levels 
+
+# test avg temp 
+test_max <- test %>%
+    select(contains('max_temp')) 
+test$avg_max_temp <- apply(test_max, 1, mean)
+test$max_max_temp <- apply(test_max, 1, max)
+test$min_max_temp <- apply(test_max, 1, min)
+test$range_max_temp <- apply(test_max, 1, diff_range)
+
+test_min <- test %>%
+    select(contains('min_temp')) 
+test$avg_min_temp <- apply(test_min, 1, mean)
+test$max_min_temp <- apply(test_min, 1, max)
+test$min_max_temp <- apply(test_min, 1, min)
+test$range_max_temp <- apply(test_min, 1, diff_range)
+
+test_avg <- test %>%
+    select(contains('avg_temp')) 
+test$avg_avg_temp <- apply(test_avg, 1, mean)
+test$max_avg_temp <- apply(test_avg, 1, max)
+test$min_avg_temp <- apply(test_avg, 1, min)
+test$range_avg_temp <- apply(test_avg, 1, diff_range)
+
+
+dummy <- dummyVars("~.", data = test)
+newdata_test <- data.frame(predict(dummy, newdata = test))
+
+test_df <- subset(newdata_test, select =-c(days_with_fog, direction_max_wind_speed, max_wind_speed, direction_peak_wind_speed, id, energy_star_rating))
+
+
+```
+
+# Site EUI testing Model, Trying Different Kinds! 
+
+```{r testing}
+library(caret)
+library(Matrix)
+library(glmnet)
+library(ModelMetrics)
+
+# Creating 10-folds
+set.seed(123)
+train_folds <- createFolds(train_df, k = 10)
+
+#fit <- lm(site_eui ~ ., data=train_df)
+#pred <- predict(fit, test)
+
+
+# OLS
+ols <-function(test, train){
+  fit <- lm(train$site_eui ~ ., data=train)
+  pred <- predict(fit, train)
+  return(rmse(actual = train$site_eui, predicted = pred))
+}
+
+# CHECKING 
+# doesn't work
+ols(train_df[test_folds[[1]], ], train_df[-test_folds[[1]], ])
+
+# this works 
+fit <- lm(train_df[-test_folds[[1]], ]$site_eui ~., data = train_df[-test_folds[[1]], ])
+pred <- predict(fit, train_df[-test_folds[[1]], ])
+rmse(actual = train_df[-test_folds[[1]], ]$site_eui, predicted = pred)
+
+# STEPWISE
+stepwise <-function(test, train){
+  fit = lm(train$site_eui ~ ., data=train)
+  fit_summary = summary(fit)$coefficients
+  okay_features = rownames(fit_summary)[fit_summary[, 4] < 0.05]
+  init_formula = paste('site_eui ~', paste(okay_features[-1], collapse ='+'))
+  init_mod = lm(init_formula, data=train)
+  step_mod <- step(init_mod, "~.", trace = 0)
+  pred <- predict(step_mod, train)
+  return(rmse(actual = train$site_eui, predicted = pred))
+}
+
+# LASSO 
+lasso <-function(test, train){
+  x_train <- Matrix(as.matrix(train[ , -which(colnames(train) == "site_eui")]), sparse = TRUE)
+  y_train <- train$site_eui
+  x_test <- Matrix(as.matrix(test[ , -which(colnames(test) == "site_eui")]), sparse = TRUE)
+  y_test <- test$site_eui
+  lasso_cv <- cv.glmnet(x_train, y_train, alpha = 1, nfolds = 5,intercept = TRUE)
+  lasso_mod <- glmnet(x_train, y_train, alpha = 1, lambda = lasso_cv$lambda.min)
+  pred <- predict(lasso_mod, x_test)
+  return(rmse(actual = y_test, predicted=pred))
+}
+
+# RIDGE
+ridge <-function(test, train){
+  x_train <- Matrix(as.matrix(train[ , -which(colnames(train) == "site_eui")]), sparse = TRUE)
+  y_train <- train$site_eui
+  x_test <- Matrix(as.matrix(test[ , -which(colnames(test) == "site_eui")]), sparse = TRUE)
+  y_test <- test$site_eui
+  ridge_cv <- cv.glmnet(x_train, y_train, alpha = 0, nfolds = 5, intercept = TRUE)
+  ridge_mod <- glmnet(x_train, y_train, alpha = 0, lambda = ridge_cv$lambda.min)
+  pred <- predict(ridge_mod, x_test)
+  return(rmse(actual = y_test, predicted=pred))
+}
+
+mod <- data.frame(matrix(nrow = 5, ncol = 5))
+colnames(mod) <- c("ols", "stepwise", "lasso", "ridge", "min")
+for(i in 1:10){
+  test1 <- train_df[test_folds[[i]], ]
+  train1 <- train_df[-test_folds[[i]], ]
+  mod[i, "ols"] <- ols(test1, train1)
+  mod[i, "stepwise"] <- stepwise(test1, train1)
+  mod[i, "lasso"] <- lasso(test1, train1)
+  mod[i, "ridge"] <- ridge(test1, train1)
+}
+for(i in 1:10){
+  mod[i, "min"] <- names(which.min(mod[i, ]))
+}
+print(mod)
+
+```
+
+# Ok, OLS and Ridge are tied. Let's try ridge! 
+
+```{r training}
+library(Matrix)
+library(caret)
+library(glmnet)
+library(ModelMetrics)
+
+all_x <- Matrix(as.matrix(train_df[ , -which(colnames(train_df) == "site_eui")]), sparse = TRUE)
+all_y <- train_df$site_eui
+
+#without norm
+ridge_cv <- cv.glmnet(all_x, all_y, alpha = 1, nfolds = 5, intercept = TRUE)
+ridge_mod <- glmnet(all_x, all_y, alpha = 1, lambda = ridge_cv$lambda.min)
+not_norm_coefficients <- as.matrix(ridge_mod$beta)
+plot(not_norm_coefficients, main = "Coefficients of Ridge (Without Norm)", ylab = "Beta")
+
+#with norm 
+#all_x_scaled <- scale(Matrix(as.matrix(train_df[, -which(colnames(train_df) == "site_eui")]), sparse = TRUE))
+#lasso_cv <- cv.glmnet(all_x_scaled, all_y, alpha = 1, nfolds = 5, intercept = TRUE)
+#lasso_mod <- glmnet(all_x_scaled, all_y, alpha = 1, lambda = lasso_cv$lambda.min)
+#yes_norm_coefficients <- as.matrix(lasso_mod$beta)
+#plot(yes_norm_coefficients, main = "Coefficients of Ridge (With Norm)", ylab = "Beta")
+
+top_tokens_not_norm <- rownames(not_norm_coefficients)[order(abs(not_norm_coefficients), decreasing = TRUE)[1:20]]
+#top_tokens_norm <- rownames(yes_norm_coefficients)[order(abs(yes_norm_coefficients), decreasing = TRUE)[1:25]]
+#sum(top_tokens_norm %in% top_tokens_not_norm)
+#overlap <- top_tokens_norm[which(top_tokens_norm %in% top_tokens_not_norm)] 
+
+#train_df2 <- subset(train_df, select=-overlap)
+
+# wooooooooo let's use these as our overlap parameters! 
+init_formula = paste('site_eui ~', paste(top_tokens_not_norm, collapse ='+'))
+fit2 = lm(init_formula, data=train_df)
+pred <- predict(fit2, newdata = test_df, type="response")
+
+
+output <- data.frame("id" = test$id, "site_eui" = pred)
+write.csv(output, "submission1-jan12.csv", row.names = FALSE)
+
+```
+
+This got a 57!
+
+# XGBoost 
+
+```{r}
+require(xgboost)
+require(Matrix)
+require(data.table)
+if (!require('vcd')) install.packages('vcd')
+
+df <- data.table(train_df, keep.rownames = FALSE)
+df_test <- data.table(test_df, keep.rownames = FALSE)
+
+# removing IDS
+#df[,ID:=NULL] 
+#df_test[,ID:=NULL]
+
+sparse_matrix <-  xgb.DMatrix(sparse.model.matrix(site_eui~.-1, data = df))
+
+output_vector = df[,site_eui] # see if this is right 
+
+#bst_model <- xgb.train(params = as.list(overlap),
+#                       data = sparse_matrix, 
+#                       label = output_vector,
+#                       nrounds = 15000, 
+#                       #watchlist =list(validation1=sparse_matrix, validation2=sparse_matrix_test),
+#                       max.depth = 50,
+#                       eta = .01, 
+#                       min.child.weight = 4, 
+#                       colsample_bytree=.25, 
+#                       max.delta.step=3,
+#                       n_estimators=300,
+#                       gamma=20,
+#                      subsample=.35,
+#                       lambda=5,
+#                       missing = NA, 
+#                       objective ="reg:squarederror",
+#)
+
+
+trctrl <- trainControl(method = "cv", number = 5)
+tune_grid <- expand.grid(nrounds = 200,
+                        max_depth = 50,
+                        eta = 0.01,
+                        gamma = 20,
+                        colsample_bytree = 0.25,
+                        min_child_weight = 4,
+                        subsample = 0.35
+                        )
+
+#init_formula = paste('site_eui ~', paste(top_tokens_not_norm, collapse ='+'))
+#xbg_fit <- train(site_eui ~ september_avg_temp + days_below_20F +february_avg_temp +june_max_temp +november_avg_temp +december_min_temp + march_min_temp +august_max_temp +october_max_temp + september_min_temp +august_min_temp +february_max_temp + days_below_0F + june_avg_temp + august_avg_temp + may_avg_temp + september_max_temp + precipitation_inches + july_min_temp + building_class+ no_fog_record +no_energy_star + Year_Factor, data = train_df, method = "xgbTree",
+#                trControl=trctrl,
+#                tuneGrid = tune_grid,
+#                tuneLength = 10)
+xbg_fit <- train(site_eui ~ ., data = train_df, method = "xgbTree",
+                trControl=trctrl,
+                tuneGrid = tune_grid,
+                tuneLength = 10)
+xbg_fit
+
+pred <- predict(xbg_fit, test_df)
+
+output <- data.frame("id" = test$id, "site_eui" = pred)
+write.csv(output, "submission6.csv", row.names = FALSE)
+
+```
+
+# Trying H20
+
+```{r}
+
+library(h2o)
+h2o.init()
+
+train <- as.h2o(train_df)
+test <- as.h2o(test_df)
+
+y <- "site_eui" 
+x <- setdiff(names(train), y)
+aml <- h2o.automl(x = x, y = y,
+                  training_frame = train,
+                  max_models = 20,
+                  seed = 1,
+                  max_runtime_secs=2000,
+                  )
+
+lb <- aml@leaderboard
+print(lb, n = nrow(lb))  # Print all rows instead of default (6 rows)
+
+aml@leader
+
+# this is the best model 
+m <- h2o.get_best_model(aml, criterion = "rmse")
+m@parameters
+
+pred <- h2o.predict(aml, test)  # predict(aml, test) also works
+
+test <- read.csv("~/Downloads/wids/test.csv")
+output <- data.frame("id" = test$id, "site_eui" = as.data.frame(pred))
+colnames(output) <- c("id", "site_eui")
+write.csv(output, "submissionh2o.csv", row.names = FALSE)
+
+```
+
+Best submission is h2o with no min/max/avg temp columns and 
